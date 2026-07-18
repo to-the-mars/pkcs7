@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 )
 
@@ -413,11 +414,19 @@ type dsaSignature struct {
 	R, S *big.Int
 }
 
-// concats and wraps the certificates in the RawValue structure
+// concats and wraps the certificates in canonical DER SET OF order
 func marshalCertificates(certs []*x509.Certificate) rawCertificates {
+	rawCertificateSet := make([][]byte, len(certs))
+	for i, cert := range certs {
+		rawCertificateSet[i] = cert.Raw
+	}
+	sort.Slice(rawCertificateSet, func(i, j int) bool {
+		return bytes.Compare(rawCertificateSet[i], rawCertificateSet[j]) < 0
+	})
+
 	var buf bytes.Buffer
-	for _, cert := range certs {
-		buf.Write(cert.Raw)
+	for _, rawCert := range rawCertificateSet {
+		buf.Write(rawCert)
 	}
 	rawCerts, _ := marshalCertificateBytes(buf.Bytes())
 	return rawCerts

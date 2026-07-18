@@ -67,6 +67,23 @@ func TestSignerInfoConfigOmitSigningTime(t *testing.T) {
 	}
 }
 
+func TestMarshalCertificatesUsesCanonicalDERSetOrder(t *testing.T) {
+	lower := &x509.Certificate{Raw: []byte{0x30, 0x03, 0x02, 0x01, 0x01}}
+	higher := &x509.Certificate{Raw: []byte{0x30, 0x03, 0x02, 0x01, 0x02}}
+
+	encoded := marshalCertificates([]*x509.Certificate{higher, lower})
+	var set asn1.RawValue
+	if rest, err := asn1.Unmarshal(encoded.Raw, &set); err != nil {
+		t.Fatal(err)
+	} else if len(rest) != 0 {
+		t.Fatalf("unexpected trailing DER: %x", rest)
+	}
+	want := append(append([]byte(nil), lower.Raw...), higher.Raw...)
+	if !bytes.Equal(set.Bytes, want) {
+		t.Fatalf("certificate set is not canonically sorted: got %x, want %x", set.Bytes, want)
+	}
+}
+
 func testSign(t *testing.T, sigalgs []x509.SignatureAlgorithm) {
 	content := []byte("Hello World")
 	for _, sigalgroot := range sigalgs {
