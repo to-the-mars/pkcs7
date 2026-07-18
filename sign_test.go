@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestSign(t *testing.T) {
@@ -23,6 +24,47 @@ func TestSign(t *testing.T) {
 		x509.ECDSAWithSHA512,
 		x509.PureEd25519,
 	})
+}
+
+func hasSigningTime(t *testing.T, cfg SignerInfoConfig) bool {
+	t.Helper()
+	root, err := createTestCertificateByIssuer("root", nil, x509.ECDSAWithSHA256, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := createTestCertificateByIssuer("signer", root, x509.ECDSAWithSHA256, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := NewSignedData([]byte("content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sd.AddSignerChain(signer.Certificate, *signer.PrivateKey, []*x509.Certificate{root.Certificate}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	der, err := sd.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p7, err := Parse(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got time.Time
+	return unmarshalAttribute(p7.Signers[0].AuthenticatedAttributes, OIDAttributeSigningTime, &got) == nil
+}
+
+func TestSignerInfoConfigSigningTimeCompatibility(t *testing.T) {
+	if !hasSigningTime(t, SignerInfoConfig{}) {
+		t.Fatal("zero-value config must retain signingTime")
+	}
+}
+
+func TestSignerInfoConfigOmitSigningTime(t *testing.T) {
+	if hasSigningTime(t, SignerInfoConfig{OmitSigningTime: true}) {
+		t.Fatal("signingTime must be absent")
+	}
 }
 
 func testSign(t *testing.T, sigalgs []x509.SignatureAlgorithm) {
