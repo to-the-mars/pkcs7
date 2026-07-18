@@ -319,7 +319,11 @@ func (sd *SignedData) GetSignedData() *signedData {
 
 // Finish marshals the content and its signers
 func (sd *SignedData) Finish() ([]byte, error) {
-	sd.sd.Certificates = marshalCertificates(sd.certs)
+	certificates, err := marshalCertificates(sd.certs)
+	if err != nil {
+		return nil, err
+	}
+	sd.sd.Certificates = certificates
 	inner, err := asn1.Marshal(sd.sd)
 	if err != nil {
 		return nil, err
@@ -415,33 +419,95 @@ type dsaSignature struct {
 }
 
 // concats and wraps the certificates in canonical DER SET OF order
-func marshalCertificates(certs []*x509.Certificate) rawCertificates {
-	rawCertificateSet := make([][]byte, len(certs))
-	for i, cert := range certs {
-		rawCertificateSet[i] = cert.Raw
-	}
-	sort.Slice(rawCertificateSet, func(i, j int) bool {
-		return bytes.Compare(rawCertificateSet[i], rawCertificateSet[j]) < 0
-	})
-
+func marshalCertificates(certs []*x509.Certificate) (rawCertificates, error) {
 	var buf bytes.Buffer
-	for _, rawCert := range rawCertificateSet {
-		buf.Write(rawCert)
+	for _, cert := range certs {
+		buf.Write(cert.Raw)
 	}
-	rawCerts, _ := marshalCertificateBytes(buf.Bytes())
-	return rawCerts
+	return marshalCertificateBytes(buf.Bytes())
 }
 
 // Even though, the tag & length are stripped out during marshalling the
 // RawContent, we have to encode it into the RawContent. If its missing,
 // then `asn1.Marshal()` will strip out the certificate wrapper instead.
 func marshalCertificateBytes(certs []byte) (rawCertificates, error) {
-	val := asn1.RawValue{Bytes: certs, Class: 2, Tag: 0, IsCompound: true}
+	canonical, err := canonicalizeCertificateChoices(certs)
+	if err != nil {
+		return rawCertificates{}, err
+	}
+	val := asn1.RawValue{Bytes: canonical, Class: 2, Tag: 0, IsCompound: true}
 	b, err := asn1.Marshal(val)
 	if err != nil {
 		return rawCertificates{}, err
 	}
 	return rawCertificates{Raw: b}, nil
+}
+
+func canonicalizeCertificateChoices(der []byte) ([]byte, error) {
+	choices := make([][]byte, 0, 1)
+	for len(der) > 0 {
+		var choice asn1.RawValue
+		rest, err := asn1.Unmarshal(der, &choice)
+		if err != nil {
+			return nil, fmt.Errorf("pkcs7: invalid certificate DER: %w", err)
+		}
+		if len(choice.FullBytes) == 0 || len(rest) >= len(der) {
+			return nil, errors.New("pkcs7: invalid empty certificate DER")
+		}
+		if err := validateCertificateChoice(choice); err != nil {
+			return nil, err
+		}
+		choices = append(choices, choice.FullBytes)
+		der = rest
+	}
+
+	sort.Slice(choices, func(i, j int) bool {
+		return bytes.Compare(choices[i], choices[j]) < 0
+	})
+	var canonical bytes.Buffer
+	for _, choice := range choices {
+		canonical.Write(choice)
+	}
+	return canonical.Bytes(), nil
+}
+
+func validateCertificateChoice(choice asn1.RawValue) error {
+	if choice.Class == 0 && choice.Tag == asn1.TagSequence && choice.IsCompound {
+		if _, err := x509.ParseCertificate(choice.FullBytes); err != nil {
+			return fmt.Errorf("pkcs7: invalid X.509 certificate: %w", err)
+		}
+		return nil
+	}
+	if choice.Class == 2 && choice.Tag >= 0 && choice.Tag <= 3 && choice.IsCompound {
+		if len(choice.Bytes) == 0 {
+			return errors.New("pkcs7: empty certificate choice contents")
+		}
+		if err := validateConstructedDER(choice.Bytes); err != nil {
+			return fmt.Errorf("pkcs7: invalid certificate choice contents: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("pkcs7: invalid certificate choice class %d tag %d", choice.Class, choice.Tag)
+}
+
+func validateConstructedDER(der []byte) error {
+	for len(der) > 0 {
+		var value asn1.RawValue
+		rest, err := asn1.Unmarshal(der, &value)
+		if err != nil {
+			return err
+		}
+		if len(value.FullBytes) == 0 || len(rest) >= len(der) {
+			return errors.New("invalid empty DER value")
+		}
+		if value.IsCompound {
+			if err := validateConstructedDER(value.Bytes); err != nil {
+				return err
+			}
+		}
+		der = rest
+	}
+	return nil
 }
 
 // DegenerateCertificate creates a signed data structure containing only the
